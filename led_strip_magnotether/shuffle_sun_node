@@ -1,0 +1,212 @@
+#!/usr/bin/env python
+
+
+
+import datetime
+import time
+import sys
+import rospy
+import numpy as np
+from copy import copy
+from std_msgs.msg import Header #Need this for SunInfo? 2/9
+from std_msgs.msg import String
+from  basic_led_strip_proxy import BasicLedStripProxy
+from basic_led_strip import BasicLedStrip
+from basic_led_strip_ros.msg import StripLEDInfo
+from basic_led_strip_ros.msg import SunInfo
+from collections import Iterable
+import random
+
+
+class ShuffleSun:
+
+
+    def __init__(self):
+
+        rospy.init_node('shuffle_sun')
+        rospy.on_shutdown(self.sunset)
+        self.sun_position_pub = rospy.Publisher('sun_position', SunInfo, queue_size=10)
+        rate = rospy.Rate(5) #Rate we want to publish message in Hz #added 1/20
+        self.led_strip = BasicLedStripProxy(use_thread=True) #True? False?
+        self.led_index_list = range(144)
+        ######################################### 
+        self.sun_positions = [57, 93, 129]  #sun position in terms of actual LED number 19(135)18, 57(45)56, 93(-45)92, 129(-135)128
+        #########################################
+        #self.sun_positions = [ 93, 99, 105 ] #For testing LEDs
+        self.current_sun_position =0
+        np.random.shuffle(self.sun_positions) #!!!comment out if you need the same sun(and put the same sun position in the very front)
+        print(self.sun_positions)
+        self.last_operation = None
+
+    def sunset(self):
+        print('Sun is setting')
+        self.led_strip.set_all(( 0, 0, 0))
+        sys.exit()
+
+    def publish_sun_position(self):
+        sun_msg = SunInfo()
+        sun_msg.header.stamp = rospy.Time.now()
+        sun_msg.sun_position = self.current_sun_position
+        #rospy.loginfo('Sun Info:' + str(sun_msg)) #shows what is being published as a message
+        self.sun_position_pub.publish(sun_msg)
+    
+    def dark(self):
+        self.led_strip.set_all((  0,   0,   0))
+        self.current_sun_position = 0
+
+##Suns in the same position######
+    #def sun_sample_no_replacement(self):
+    #    for sun_position in self.sun_positions:
+    #        self.current_sun_position = self.sun_positions[0]
+    #        self.led_strip.set_led(self.sun_positions[0],(0,8,0)) #original (0,128,0) -lowered brightness
+    #        yield self.sun_positions[0]
+
+
+#original######
+
+    def sun_sample_no_replacement(self):
+         for sun_position in self.sun_positions:
+             self.current_sun_position = sun_position
+             self.led_strip.set_led(sun_position,(0,8,0)) #original (0,128,0) -lowered brightness (MAX:255)
+             yield sun_position
+
+
+    """
+    Added 6/27 to test 'Jumping Sun' paradigm 
+    starting_sun: Randomly selects a sun position between the range of (1, 141)
+    jumping_sun: Moves the sun 15-degrees (~6LEDs) clockwise(-6) or counterclockwise(+6)
+
+    """
+    def starting_sun(self):
+        start, end = 1, 141
+        return random.randint(start,end)
+
+    def jumping_sun(self): #change number according the the number of LEDs you are moving 6-->1 8/17
+        if self.last_operation is None:
+            self.last_operation = random.choice([-1,1])
+        
+        potential_next_position = self.current_sun_position + 1 * self.last_operation #change number according the the number of LEDs you are moving
+        #Ensure the next sun position is within range
+        if potential_next_position< 21:     ##change number to keep within range of 1-141
+            self.current_sun_position += 1 
+            self.last_operation = 1
+
+        elif potential_next_position > 120:    ##change number to keep within range of 1-141
+            self.current_sun_position -= 1
+            self.last_operation = -1
+        else:
+            self.current_sun_position = potential_next_position
+        return self.current_sun_position
+
+
+    
+    def set_sun(self):
+        print("Current sun position at beginning of next_sun: {}".format(self.current_sun_position))
+        #self.current_sun_position = 98  ###USE when running the second flight period
+        if self.current_sun_position ==0:
+            sun_position = self.starting_sun()
+        else: 
+            sun_position = self.jumping_sun()
+        self.led_strip.set_led(sun_position, (0,8,0))
+        self.current_sun_position = sun_position
+        self.publish_sun_position()
+
+
+    def run(self):
+
+        while not rospy.is_shutdown():
+
+            """
+            This experiment consists of the following procedure:
+                1) Dark period                                                        - 30 seconds
+                2) Random light from positions [19(135), 57(45), 93(-45), 129(-135)]  - 5 minute
+                3) Random light from positions [19, 57, 93, 129] w/o replacement      - 5 minute
+                4) Dark period                                                        - 30 seconds
+
+
+            'Jumping Sun' paradigm for moving the sun 15 degrees clockwise or counterclockwise:
+
+                1) Dark period                                                              - 30 seconds
+                2) Random light from range(1, 141)                                          - 5 minute
+                [5min rest period in the dark with kimwipe]
+                3) Light moves 15 degrees clockwise(-6 LED) / counterclockwise (+6 LED)     - 5 minute
+            
+            """
+            sun_sampling = self.sun_sample_no_replacement()
+            #print('same sun sampling', same_sun_sampling)
+            
+
+            
+
+            procedure = [
+                                [self.dark,1],
+                                [sun_sampling,300]
+                            #    #[sun_sampling,300]                           
+
+                        # # # #for continuous flight
+                              #[self.dark,30],
+                              #[sun_sampling,300],
+                              #[self.dark,300],                        
+                              #[sun_sampling,300]
+                       
+                        #For moving sun 15 degrees
+                        #    [self.dark,5],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #     [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #     [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #     [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #     [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #     [self.set_sun, 10],
+                        #    [self.set_sun, 10],
+                        #    [self.set_sun, 10]
+
+
+                            
+
+                            
+                        ]
+            self.experiment(procedure)
+            self.sunset() # sys.exit()
+
+
+    # def experiment(self,procedure):
+    #     for step, timestep in procedure:
+    #         if isinstance(step,Iterable):
+    #             try:
+    #                 next(step)
+    #             except StopIteration:
+    #                 print("step {} is no longer iterable".format(step.__name__))
+    #         else:
+    #             step()
+    #         self.publish_sun_position()
+    #         print('sun_position: ' + str(self.current_sun_position))
+    #         time.sleep(timestep)
+    def experiment(self,procedure):
+            for step, timestep in procedure:
+                if isinstance(step,Iterable):
+                    if any(step):
+                        next(step)
+                    else:
+                        print("step {} is no longer iterable".format(step.__name__))
+                else:
+                    step()
+                self.publish_sun_position()
+                print('sun_position: ' + str(self.current_sun_position))
+                time.sleep (timestep)
+#-------------------------------------------------------------------------------------------------
+if __name__ == '__main__':
+
+    node = ShuffleSun()
+    node.run()
+
+
